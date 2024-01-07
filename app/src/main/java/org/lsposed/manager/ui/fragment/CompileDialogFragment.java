@@ -63,6 +63,7 @@ public class CompileDialogFragment extends AppCompatDialogFragment {
         FragmentCompileDialogBinding binding = FragmentCompileDialogBinding.inflate(LayoutInflater.from(requireActivity()), null, false);
         final PackageManager pm = requireContext().getPackageManager();
         var builder = new BlurBehindDialogBuilder(requireActivity())
+                .setIcon(appInfo.loadIcon(pm))
                 .setTitle(appInfo.loadLabel(pm))
                 .setView(binding.getRoot());
 
@@ -82,6 +83,7 @@ public class CompileDialogFragment extends AppCompatDialogFragment {
         @Override
         protected Throwable doInBackground(String... commands) {
             try {
+                LSPManagerServiceHolder.getService().clearApplicationProfileData(commands[0]);
                 if (LSPManagerServiceHolder.getService().performDexOptMode(commands[0])) {
                     return null;
                 } else {

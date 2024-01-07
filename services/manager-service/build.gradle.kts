@@ -18,10 +18,14 @@
  */
 
 plugins {
-    id("com.android.library")
+    alias(libs.plugins.agp.lib)
 }
 
 android {
+    buildFeatures {
+        aidl = true
+    }
+
     defaultConfig {
         consumerProguardFiles("proguard-rules.pro")
     }
@@ -31,8 +35,9 @@ android {
             isMinifyEnabled = false
         }
     }
+    namespace = "org.lsposed.lspd.managerservice"
 }
 
 dependencies {
-    api(projects.services.xposedService.`interface`)
+    api(libs.rikkax.parcelablelist)
 }

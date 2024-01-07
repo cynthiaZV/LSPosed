@@ -39,8 +39,15 @@
 using namespace lsplant;
 namespace {
 std::mutex init_lock{};
-std::string obfuscated_signature;
-const std::string old_signature = "Lde/robv/android/xposed";
+std::map<const std::string, std::string> signatures = {
+        {"Lde/robv/android/xposed/", ""},
+        { "Landroid/app/AndroidApp", ""},
+        { "Landroid/content/res/XRes", ""},
+        { "Landroid/content/res/XModule", ""},
+        { "Lorg/lsposed/lspd/core/", ""},
+        { "Lorg/lsposed/lspd/nativebridge/", ""},
+        { "Lorg/lsposed/lspd/service/", ""},
+};
 
 jclass class_file_descriptor;
 jmethodID method_file_descriptor_ctor;
@@ -49,6 +56,12 @@ jclass class_shared_memory;
 jmethodID method_shared_memory_ctor;
 
 bool inited = false;
+}
+
+static std::string to_java(const std::string &signature) {
+    std::string java(signature, 1);
+    replace(java.begin(), java.end(), '/', '.');
+    return java;
 }
 
 void maybeInit(JNIEnv *env) {
@@ -67,7 +80,7 @@ void maybeInit(JNIEnv *env) {
 
     method_shared_memory_ctor = JNI_GetMethodID(env, class_shared_memory, "<init>", "(Ljava/io/FileDescriptor;)V");
 
-    auto regen = []() {
+    auto regen = [](std::string_view original_signature) {
         static auto& chrs = "abcdefghijklmnopqrstuvwxyz"
                             "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -76,65 +89,91 @@ void maybeInit(JNIEnv *env) {
         thread_local static std::uniform_int_distribution<std::string::size_type> choose_slash(0, 10);
 
         std::string out;
-        size_t length = old_signature.size();
+        size_t length = original_signature.size();
         out.reserve(length);
         out += "L";
 
-        for (size_t i = 1; i < length; i++) {
+        for (size_t i = 1; i < length - 1; i++) {
             if (choose_slash(rg) > 8 &&                         // 80% alphabet + 20% slashes
                 out[i - 1] != '/' &&                                // slashes could not stick together
                 i != 1 &&                                           // the first character should not be slash
-                i != length - 1) {                                  // and the last character
+                i != length - 2) {                                  // and the last character
                 out += "/";
             } else {
                 out += chrs[pick(rg)];
             }
         }
+
+        out += "/";
         return out;
     };
 
-    auto contains_keyword = [](std::string_view s) -> bool {
-        for (const auto &i: {
-                "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-                "continue", "const", "default", "do", "double", "else", "enum", "exports", "extends",
-                "final", "finally", "float", "for", "goto", "if", "implements", "import", "instanceof",
-                "int", "interface", "long", "module", "native", "new", "package", "private", "protected",
-                "public", "requires", "return", "short", "static", "strictfp", "super", "switch",
-                "synchronized", "this", "throw", "throws", "transient", "try", "var", "void", "volatile",
-                "while"}) {
-            if (s.find(i) != std::string::npos) return true;
-        }
-        return false;
-    };
+    for (auto &i: signatures) {
+        i.second = regen(i.first);
+        LOGD("%s => %s", i.first.c_str(), i.second.c_str());
+    }
 
-    [[unlikely]] do {
-        obfuscated_signature = regen();
-    } while (contains_keyword(obfuscated_signature));
-
-    LOGD("ObfuscationManager.getObfuscatedSignature: %s", obfuscated_signature.c_str());
     LOGD("ObfuscationManager init successfully");
     inited = true;
 }
 
+// https://stackoverflow.com/questions/4844022/jni-create-hashmap with modifications
+jobject stringMapToJavaHashMap(JNIEnv *env, const decltype(signatures)& map) {
+    jclass mapClass = env->FindClass("java/util/HashMap");
+    if(mapClass == nullptr)
+        return nullptr;
+
+    jmethodID init = env->GetMethodID(mapClass, "<init>", "()V");
+    jobject hashMap = env->NewObject(mapClass, init);
+    jmethodID put = env->GetMethodID(mapClass, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+
+    auto citr = map.begin();
+    for( ; citr != map.end(); ++citr) {
+        jstring keyJava = env->NewStringUTF(citr->first.c_str());
+        jstring valueJava = env->NewStringUTF(citr->second.c_str());
+
+        env->CallObjectMethod(hashMap, put, keyJava, valueJava);
+
+        env->DeleteLocalRef(keyJava);
+        env->DeleteLocalRef(valueJava);
+    }
+
+    auto hashMapGobal = static_cast<jobject>(env->NewGlobalRef(hashMap));
+    env->DeleteLocalRef(hashMap);
+    env->DeleteLocalRef(mapClass);
+
+    return hashMapGobal;
+}
+
 extern "C"
-JNIEXPORT jstring JNICALL
-Java_org_lsposed_lspd_service_ObfuscationManager_getObfuscatedSignature(JNIEnv *env, [[maybe_unused]] jclass obfuscation_manager) {
+JNIEXPORT jobject JNICALL
+Java_org_lsposed_lspd_service_ObfuscationManager_getSignatures(JNIEnv *env, [[maybe_unused]] jclass obfuscation_manager) {
     maybeInit(env);
-    return env->NewStringUTF(obfuscated_signature.c_str());
+    static jobject signatures_jni = nullptr;
+    if (signatures_jni) return signatures_jni;
+    decltype(signatures) signatures_java;
+    for (const auto &i: signatures) {
+        signatures_java[to_java(i.first)] = to_java(i.second);
+    }
+    signatures_jni = stringMapToJavaHashMap(env, signatures_java);
+    return signatures_jni;
 }
 
 static int obfuscateDex(const void *dex, size_t size) {
-    const char* new_sig = obfuscated_signature.c_str();
+    // const char* new_sig = obfuscated_signature.c_str();
     dex::Reader reader{reinterpret_cast<const dex::u1*>(dex), size};
 
     reader.CreateFullIr();
     auto ir = reader.GetIr();
     for (auto &i: ir->strings) {
         const char *s = i->c_str();
-        char* p = const_cast<char *>(strstr(s, old_signature.c_str()));
-        if (p) {
-            // NOLINTNEXTLINE bugprone-not-null-terminated-result
-            memcpy(p, new_sig, strlen(new_sig));
+        for (const auto &signature: signatures) {
+            char* p = const_cast<char *>(strstr(s, signature.first.c_str()));
+            if (p) {
+                auto new_sig = signature.second.c_str();
+                // NOLINTNEXTLINE bugprone-not-null-terminated-result
+                memcpy(p, new_sig, strlen(new_sig));
+            }
         }
     }
     dex::Writer writer(ir);

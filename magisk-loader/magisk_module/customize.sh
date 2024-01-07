@@ -79,26 +79,16 @@ fi
 ui_print "- Extracting module files"
 
 extract "$ZIPFILE" 'module.prop'        "$MODPATH"
-extract "$ZIPFILE" 'system.prop'        "$MODPATH"
 extract "$ZIPFILE" 'post-fs-data.sh'    "$MODPATH"
 extract "$ZIPFILE" 'service.sh'         "$MODPATH"
 extract "$ZIPFILE" 'uninstall.sh'       "$MODPATH"
+extract "$ZIPFILE" 'sepolicy.rule'      "$MODPATH"
 extract "$ZIPFILE" 'framework/lspd.dex' "$MODPATH"
 extract "$ZIPFILE" 'daemon.apk'         "$MODPATH"
 extract "$ZIPFILE" 'daemon'             "$MODPATH"
 rm -f /data/adb/lspd/manager.apk
-extract "$ZIPFILE" 'manager.apk'        '/data/adb/lspd'
+extract "$ZIPFILE" 'manager.apk'        "$MODPATH"
 
-ui_print "- Extracting daemon libraries"
-if [ "$ARCH" = "arm" ] ; then
-  extract "$ZIPFILE" 'lib/armeabi-v7a/libdaemon.so' "$MODPATH" true
-elif [ "$ARCH" = "arm64" ]; then
-  extract "$ZIPFILE" 'lib/arm64-v8a/libdaemon.so' "$MODPATH" true
-elif [ "$ARCH" = "x86" ]; then
-  extract "$ZIPFILE" 'lib/x86/libdaemon.so' "$MODPATH" true
-elif [ "$ARCH" = "x64" ]; then
-  extract "$ZIPFILE" 'lib/x86_64/libdaemon.so' "$MODPATH" true
-fi
 if [ "$FLAVOR" == "zygisk" ]; then
   mkdir -p "$MODPATH/zygisk"
   if [ "$ARCH" = "arm" ] || [ "$ARCH" = "arm64" ]; then
@@ -112,16 +102,15 @@ if [ "$FLAVOR" == "zygisk" ]; then
   fi
 
   if [ "$ARCH" = "x86" ] || [ "$ARCH" = "x64" ]; then
-    extract "$ZIPFILE" "lib/x86_64/liblspd.so" "$MODPATH/zygisk" true
-    mv "$MODPATH/zygisk/liblspd.so" "$MODPATH/zygisk/x86_64.so"
+    extract "$ZIPFILE" "lib/x86/liblspd.so" "$MODPATH/zygisk" true
+    mv "$MODPATH/zygisk/liblspd.so" "$MODPATH/zygisk/x86.so"
 
     if [ "$IS64BIT" = true ]; then
-      extract "$ZIPFILE" "lib/x86/liblspd.so" "$MODPATH/zygisk" true
-      mv "$MODPATH/zygisk/liblspd.so" "$MODPATH/zygisk/x86.so"
+      extract "$ZIPFILE" "lib/x86_64/liblspd.so" "$MODPATH/zygisk" true
+      mv "$MODPATH/zygisk/liblspd.so" "$MODPATH/zygisk/x86_64.so"
     fi
   fi
 elif [ "$FLAVOR" == "riru" ]; then
-  extract "$ZIPFILE" 'sepolicy.rule'      "$MODPATH"
   mkdir "$MODPATH/riru"
   mkdir "$MODPATH/riru/lib"
   mkdir "$MODPATH/riru/lib64"
@@ -160,7 +149,39 @@ elif [ "$FLAVOR" == "riru" ]; then
   fi
 fi
 
+if [ "$API" -ge 29 ]; then
+  ui_print "- Extracting dex2oat binaries"
+  mkdir "$MODPATH/bin"
+
+  if [ "$ARCH" = "arm" ] || [ "$ARCH" = "arm64" ]; then
+    extract "$ZIPFILE" "bin/armeabi-v7a/dex2oat" "$MODPATH/bin" true
+    mv "$MODPATH/bin/dex2oat" "$MODPATH/bin/dex2oat32"
+
+    if [ "$IS64BIT" = true ]; then
+      extract "$ZIPFILE" "bin/arm64-v8a/dex2oat" "$MODPATH/bin" true
+      mv "$MODPATH/bin/dex2oat" "$MODPATH/bin/dex2oat64"
+    fi
+  elif [ "$ARCH" == "x86" ] || [ "$ARCH" == "x64" ]; then
+    extract "$ZIPFILE" "bin/x86/dex2oat" "$MODPATH/bin" true
+    mv "$MODPATH/bin/dex2oat" "$MODPATH/bin/dex2oat32"
+
+    if [ "$IS64BIT" = true ]; then
+      extract "$ZIPFILE" "bin/x86_64/dex2oat" "$MODPATH/bin" true
+      mv "$MODPATH/bin/dex2oat" "$MODPATH/bin/dex2oat64"
+    fi
+  fi
+
+  ui_print "- Patching binaries"
+  DEV_PATH=$(tr -dc 'a-z0-9' < /dev/urandom | head -c 32)
+  sed -i "s/5291374ceda0aef7c5d86cd2a4f6a3ac/$DEV_PATH/g" "$MODPATH/daemon.apk"
+  sed -i "s/5291374ceda0aef7c5d86cd2a4f6a3ac/$DEV_PATH/" "$MODPATH/bin/dex2oat32"
+  sed -i "s/5291374ceda0aef7c5d86cd2a4f6a3ac/$DEV_PATH/" "$MODPATH/bin/dex2oat64"
+else
+  extract "$ZIPFILE" 'system.prop' "$MODPATH"
+fi
+
 set_perm_recursive "$MODPATH" 0 0 0755 0644
+set_perm_recursive "$MODPATH/bin" 0 2000 0755 0755 u:object_r:magisk_file:s0
 chmod 0744 "$MODPATH/daemon"
 
 if [ "$(grep_prop ro.maple.enable)" == "1" ] && [ "$FLAVOR" == "zygisk" ]; then

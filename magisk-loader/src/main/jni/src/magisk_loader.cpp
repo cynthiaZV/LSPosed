@@ -22,10 +22,10 @@
 #include <linux/fs.h>
 #include <sys/mman.h>
 
+#include "config_impl.h"
 #include "elf_util.h"
 #include "loader.h"
 #include "magisk_loader.h"
-#include "native_hook.h"
 #include "native_util.h"
 #include "service.h"
 #include "symbol_cache.h"
@@ -73,9 +73,15 @@ namespace lspd {
         env->DeleteLocalRef(dex_buffer);
     }
 
+    std::string GetEntryClassName() {
+        const auto &obfs_map = ConfigBridge::GetInstance()->obfuscation_map();
+        static auto signature = obfs_map.at("org.lsposed.lspd.core.") + "Main";
+        return signature;
+    }
+
     void MagiskLoader::SetupEntryClass(JNIEnv *env) {
         if (auto entry_class = FindClassFromLoader(env, GetCurrentClassLoader(),
-                                                   kEntryClassName)) {
+                                                   GetEntryClassName())) {
             entry_class_ = JNI_NewGlobalRef(env, entry_class);
         }
     }
@@ -83,10 +89,6 @@ namespace lspd {
     void
     MagiskLoader::OnNativeForkSystemServerPre(JNIEnv *env) {
         Service::instance()->InitService(env);
-        skip_ = !symbol_cache->initialized.test(std::memory_order_acquire);
-        if (skip_) [[unlikely]] {
-            LOGW("skip system server due to symbol cache");
-        }
         setAllowUnload(skip_);
     }
 
@@ -96,7 +98,7 @@ namespace lspd {
             auto *instance = Service::instance();
             auto system_server_binder = instance->RequestSystemServerBinder(env);
             if (!system_server_binder) {
-                LOGF("Failed to get system server binder, system server initialization failed. ");
+                LOGF("Failed to get system server binder, system server initialization failed.");
                 return;
             }
 
@@ -104,7 +106,10 @@ namespace lspd {
 
             // Call application_binder directly if application binder is available,
             // or we proxy the request from system server binder
-            auto [dex_fd, size]= instance->RequestLSPDex(env, application_binder ? application_binder : system_server_binder);
+            auto &&next_binder = application_binder ? application_binder : system_server_binder;
+            const auto [dex_fd, size] = instance->RequestLSPDex(env, next_binder);
+            auto obfs_map = instance->RequestObfuscationMap(env, next_binder);
+            ConfigBridge::GetInstance()->obfuscation_map(std::move(obfs_map));
             LoadDex(env, PreloadedDex(dex_fd, size));
             close(dex_fd);
             instance->HookBridge(*this, env);
@@ -119,15 +124,18 @@ namespace lspd {
                         return UnhookFunction(t) == RT_SUCCESS ;
                     },
                     .art_symbol_resolver = [](auto symbol) {
-                        return GetArt()->getSymbAddress<void*>(symbol);
+                        return GetArt()->getSymbAddress(symbol);
+                    },
+                    .art_symbol_prefix_resolver = [](auto symbol) {
+                        return GetArt()->getSymbPrefixFirstAddress(symbol);
                     },
                 };
-                InstallInlineHooks(initInfo);
-                InitHooks(env, initInfo);
+                InitArtHooker(env, initInfo);
+                InitHooks(env);
                 SetupEntryClass(env);
                 FindAndCall(env, "forkCommon",
-                            "(ZLjava/lang/String;Landroid/os/IBinder;)V",
-                            JNI_TRUE, JNI_NewStringUTF(env, "android"), application_binder);
+                            "(ZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
+                            JNI_TRUE, JNI_NewStringUTF(env, "system"), nullptr, application_binder);
                 GetArt(true);
             } else {
                 LOGI("skipped system server");
@@ -155,14 +163,14 @@ namespace lspd {
         Service::instance()->InitService(env);
         const auto app_id = uid % PER_USER_RANGE;
         JUTFString process_name(env, nice_name);
-        skip_ = !symbol_cache->initialized.test(std::memory_order_acquire);
+        skip_ = false;
         if (!skip_ && !app_data_dir) {
-            LOGD("skip injecting into %s because it has no data dir", process_name.get());
+            LOGD("skip injecting into {} because it has no data dir", process_name.get());
             skip_ = true;
         }
         if (!skip_ && is_child_zygote) {
             skip_ = true;
-            LOGD("skip injecting into %s because it's a child zygote", process_name.get());
+            LOGD("skip injecting into {} because it's a child zygote", process_name.get());
         }
 
         if (!skip_ && ((app_id >= FIRST_ISOLATED_UID && app_id <= LAST_ISOLATED_UID) ||
@@ -170,13 +178,13 @@ namespace lspd {
                         app_id <= LAST_APP_ZYGOTE_ISOLATED_UID) ||
                        app_id == SHARED_RELRO_UID)) {
             skip_ = true;
-            LOGI("skip injecting into %s because it's isolated", process_name.get());
+            LOGI("skip injecting into {} because it's isolated", process_name.get());
         }
         setAllowUnload(skip_);
     }
 
     void
-    MagiskLoader::OnNativeForkAndSpecializePost(JNIEnv *env, jstring nice_name) {
+    MagiskLoader::OnNativeForkAndSpecializePost(JNIEnv *env, jstring nice_name, jstring app_dir) {
         const JUTFString process_name(env, nice_name);
         auto *instance = Service::instance();
         auto binder = skip_ ? ScopedLocalRef<jobject>{env, nullptr}
@@ -191,27 +199,32 @@ namespace lspd {
                         return UnhookFunction(t) == RT_SUCCESS;
                     },
                     .art_symbol_resolver = [](auto symbol){
-                        return GetArt()->getSymbAddress<void*>(symbol);
+                        return GetArt()->getSymbAddress(symbol);
+                    },
+                    .art_symbol_prefix_resolver = [](auto symbol) {
+                        return GetArt()->getSymbPrefixFirstAddress(symbol);
                     },
             };
-            InstallInlineHooks(initInfo);
             auto [dex_fd, size] = instance->RequestLSPDex(env, binder);
+            auto obfs_map = instance->RequestObfuscationMap(env, binder);
+            ConfigBridge::GetInstance()->obfuscation_map(std::move(obfs_map));
             LoadDex(env, PreloadedDex(dex_fd, size));
             close(dex_fd);
-            InitHooks(env, initInfo);
+            InitArtHooker(env, initInfo);
+            InitHooks(env);
             SetupEntryClass(env);
             LOGD("Done prepare");
             FindAndCall(env, "forkCommon",
-                        "(ZLjava/lang/String;Landroid/os/IBinder;)V",
-                        JNI_FALSE, nice_name, binder);
-            LOGD("injected xposed into %s", process_name.get());
+                        "(ZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
+                        JNI_FALSE, nice_name, app_dir, binder);
+            LOGD("injected xposed into {}", process_name.get());
             setAllowUnload(false);
             GetArt(true);
         } else {
             auto context = Context::ReleaseInstance();
             auto service = Service::ReleaseInstance();
             GetArt(true);
-            LOGD("skipped %s", process_name.get());
+            LOGD("skipped {}", process_name.get());
             setAllowUnload(true);
         }
     }

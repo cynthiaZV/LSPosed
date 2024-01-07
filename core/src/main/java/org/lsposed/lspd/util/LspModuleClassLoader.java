@@ -25,14 +25,14 @@ import java.util.Objects;
 import java.util.jar.JarFile;
 import java.util.zip.ZipEntry;
 
-import dalvik.system.DelegateLastClassLoader;
-import dalvik.system.PathClassLoader;
-import de.robv.android.xposed.XposedBridge;
 import hidden.ByteBufferDexClassLoader;
+import sun.misc.CompoundEnumeration;
 
 @SuppressWarnings("ConstantConditions")
 public final class LspModuleClassLoader extends ByteBufferDexClassLoader {
     private static final String zipSeparator = "!/";
+    private static final List<File> systemNativeLibraryDirs =
+            splitPaths(System.getProperty("java.library.path"));
     private final String apk;
     private final List<File> nativeLibraryDirs = new ArrayList<>();
 
@@ -64,7 +64,7 @@ public final class LspModuleClassLoader extends ByteBufferDexClassLoader {
 
     private void initNativeLibraryDirs(String librarySearchPath) {
         nativeLibraryDirs.addAll(splitPaths(librarySearchPath));
-        nativeLibraryDirs.addAll(splitPaths(System.getProperty("java.library.path")));
+        nativeLibraryDirs.addAll(systemNativeLibraryDirs);
     }
 
     @Override
@@ -135,7 +135,12 @@ public final class LspModuleClassLoader extends ByteBufferDexClassLoader {
     protected URL findResource(String name) {
         try {
             var urlHandler = new ClassPathURLStreamHandler(apk);
-            return urlHandler.getEntryUrlOrNull(name);
+            var url = urlHandler.getEntryUrlOrNull(name);
+            if (url == null) {
+                // noinspection FinalizeCalledExplicitly
+                urlHandler.finalize();
+            }
+            return url;
         } catch (IOException e) {
             return null;
         }
@@ -161,8 +166,7 @@ public final class LspModuleClassLoader extends ByteBufferDexClassLoader {
 
     @Override
     public Enumeration<URL> getResources(String name) throws IOException {
-        @SuppressWarnings("unchecked")
-        final var resources = (Enumeration<URL>[]) new Enumeration<?>[]{
+        @SuppressWarnings("unchecked") final var resources = (Enumeration<URL>[]) new Enumeration<?>[]{
                 Object.class.getClassLoader().getResources(name),
                 findResources(name),
                 getParent() == null ? null : getParent().getResources(name)};
@@ -172,16 +176,14 @@ public final class LspModuleClassLoader extends ByteBufferDexClassLoader {
     @NonNull
     @Override
     public String toString() {
-        return "LspModuleClassLoader[" +
-                "module=" + apk + "," +
-                "nativeLibraryDirs=" + nativeLibraryDirs == null ? "null" : Arrays.toString(nativeLibraryDirs.toArray()) + "," +
-                super.toString() + "]";
+        if (apk == null) return "LspModuleClassLoader[instantiating]";
+        return "LspModuleClassLoader[module=" + apk + ", " + super.toString() + "]";
     }
 
     public static ClassLoader loadApk(String apk,
-                                               List<SharedMemory> dexes,
-                                               String librarySearchPath,
-                                               ClassLoader parent) {
+                                      List<SharedMemory> dexes,
+                                      String librarySearchPath,
+                                      ClassLoader parent) {
         var dexBuffers = dexes.stream().parallel().map(dex -> {
             try {
                 return dex.mapReadOnly();
@@ -190,14 +192,9 @@ public final class LspModuleClassLoader extends ByteBufferDexClassLoader {
                 return null;
             }
         }).filter(Objects::nonNull).toArray(ByteBuffer[]::new);
-        if (dexBuffers == null) {
-            XposedBridge.log("Failed to load dex from daemon, falling back to PathDexClassloader");
-            return new DelegateLastClassLoader(apk, librarySearchPath, parent);
-        }
         LspModuleClassLoader cl;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            cl = new LspModuleClassLoader(dexBuffers, librarySearchPath,
-                    parent, apk);
+            cl = new LspModuleClassLoader(dexBuffers, librarySearchPath, parent, apk);
         } else {
             cl = new LspModuleClassLoader(dexBuffers, parent, apk);
             cl.initNativeLibraryDirs(librarySearchPath);

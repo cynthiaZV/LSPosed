@@ -1,7 +1,9 @@
 package org.lsposed.lspd.service;
 
 import android.annotation.SuppressLint;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.os.Process;
 import android.os.SELinux;
 import android.os.SystemProperties;
 import android.system.Os;
@@ -14,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.LinkedHashMap;
 
 public class LogcatService implements Runnable {
     private static final String TAG = "LSPosedLogcat";
@@ -25,10 +28,33 @@ public class LogcatService implements Runnable {
     private int verboseFd = -1;
     private Thread thread = null;
 
+    static class LogLRU extends LinkedHashMap<File, Object> {
+        private static final int MAX_ENTRIES = 10;
+
+        public LogLRU() {
+            super(MAX_ENTRIES, 1f, false);
+        }
+
+        @Override
+        synchronized protected boolean removeEldestEntry(Entry<File, Object> eldest) {
+            if (size() > MAX_ENTRIES && eldest.getKey().delete()) {
+                Log.d(TAG, "Deleted old log " + eldest.getKey().getAbsolutePath());
+                return true;
+            }
+            return false;
+        }
+    }
+
+    @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
+    private final LinkedHashMap<File, Object> moduleLogs = new LogLRU();
+    @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
+    private final LinkedHashMap<File, Object> verboseLogs = new LogLRU();
+
     @SuppressLint("UnsafeDynamicallyLoadedCode")
     public LogcatService() {
-        String libraryPath = System.getProperty("lsp.library.path");
-        System.load(libraryPath + "/" + System.mapLibraryName("daemon"));
+        String classPath = System.getProperty("java.class.path");
+        var abi = Process.is64Bit() ? Build.SUPPORTED_64_BIT_ABIS[0] : Build.SUPPORTED_32_BIT_ABIS[0];
+        System.load(classPath + "!/lib/" + abi + "/" + System.mapLibraryName("daemon"));
         ConfigFileManager.moveLogDir();
 
         // Meizu devices set this prop and prevent debug logs from being recorded
@@ -89,8 +115,17 @@ public class LogcatService implements Runnable {
             Log.i(TAG, "New log file: " + log);
             ConfigFileManager.chattr0(log.toPath().getParent());
             int fd = ParcelFileDescriptor.open(log, mode).detachFd();
-            if (isVerboseLog) verboseFd = fd;
-            else modulesFd = fd;
+            if (isVerboseLog) {
+                synchronized (verboseLogs) {
+                    verboseLogs.put(log, new Object());
+                }
+                verboseFd = fd;
+            } else {
+                synchronized (moduleLogs) {
+                    moduleLogs.put(log, new Object());
+                }
+                modulesFd = fd;
+            }
             return fd;
         } catch (IOException e) {
             if (isVerboseLog) verboseFd = -1;

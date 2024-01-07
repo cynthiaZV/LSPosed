@@ -24,6 +24,7 @@ import static org.lsposed.lspd.service.ServiceManager.toGlobalNamespace;
 
 import android.content.res.AssetManager;
 import android.content.res.Resources;
+import android.os.Binder;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
@@ -78,8 +79,9 @@ import hidden.HiddenApiBridge;
 
 public class ConfigFileManager {
     static final Path basePath = Paths.get("/data/adb/lspd");
+    static final Path modulePath = basePath.resolve("modules");
     static final Path daemonApkPath = Paths.get(System.getProperty("java.class.path", null));
-    static final Path managerApkPath = basePath.resolve("manager.apk");
+    static final Path managerApkPath = daemonApkPath.getParent().resolve("manager.apk");
     static final File magiskDbPath = new File("/data/adb/magisk.db");
     private static final Path lockPath = basePath.resolve("lock");
     private static final Path configDirPath = basePath.resolve("config");
@@ -134,9 +136,10 @@ public class ConfigFileManager {
             Method addAssetPath = AssetManager.class.getDeclaredMethod("addAssetPath", String.class);
             addAssetPath.setAccessible(true);
             //noinspection ConstantConditions
-            if ((int) addAssetPath.invoke(am, daemonApkPath.toString()) > 0)
+            if ((int) addAssetPath.invoke(am, daemonApkPath.toString()) > 0) {
                 //noinspection deprecation
                 res = new Resources(am, null, null);
+            }
         } catch (Throwable e) {
             Log.e(TAG, Log.getStackTraceString(e));
         }
@@ -156,7 +159,7 @@ public class ConfigFileManager {
 
     static ParcelFileDescriptor getManagerApk() throws IOException {
         if (fd != null) return fd.dup();
-        if (!InstallerVerifier.verifyInstallerSignature(managerApkPath.toString())) return null;
+        InstallerVerifier.verifyInstallerSignature(managerApkPath.toString());
 
         SELinux.setFileContext(managerApkPath.toString(), "u:object_r:system_file:s0");
         fd = ParcelFileDescriptor.open(managerApkPath.toFile(), ParcelFileDescriptor.MODE_READ_ONLY);
@@ -236,8 +239,8 @@ public class ConfigFileManager {
         return logDirPath.resolve("kmsg.log").toFile();
     }
 
-    static void getLogs(ParcelFileDescriptor zipFd) throws RemoteException {
-        try (var os = new ZipOutputStream(new FileOutputStream(zipFd.getFileDescriptor()))) {
+    static void getLogs(ParcelFileDescriptor zipFd) throws IllegalStateException {
+        try (zipFd; var os = new ZipOutputStream(new FileOutputStream(zipFd.getFileDescriptor()))) {
             var comment = String.format(Locale.ROOT, "LSPosed %s %s (%d)",
                     BuildConfig.BUILD_TYPE, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE);
             os.setComment(comment);
@@ -246,21 +249,36 @@ public class ConfigFileManager {
             zipAddDir(os, oldLogDirPath);
             zipAddDir(os, Paths.get("/data/tombstones"));
             zipAddDir(os, Paths.get("/data/anr"));
+            var data = Paths.get("/data/data");
+            var app1 = data.resolve(BuildConfig.MANAGER_INJECTED_PKG_NAME + "/cache/crash");
+            var app2 = data.resolve(BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME + "/cache/crash");
+            zipAddDir(os, app1);
+            zipAddDir(os, app2);
             zipAddProcOutput(os, "full.log", "logcat", "-b", "all", "-d");
             zipAddProcOutput(os, "dmesg.log", "dmesg");
             var magiskDataDir = Paths.get("/data/adb");
-            Files.list(magiskDataDir.resolve("modules")).forEach(p -> {
-                zipAddFile(os, p, magiskDataDir);
-                zipAddFile(os, p.resolve("module.prop"), magiskDataDir);
-                zipAddFile(os, p.resolve("remove"), magiskDataDir);
-                zipAddFile(os, p.resolve("disable"), magiskDataDir);
-                zipAddFile(os, p.resolve("update"), magiskDataDir);
-                zipAddFile(os, p.resolve("sepolicy.rule"), magiskDataDir);
-            });
+            try (var l = Files.list(magiskDataDir.resolve("modules"))) {
+                l.forEach(p -> {
+                    zipAddFile(os, p, magiskDataDir);
+                    zipAddFile(os, p.resolve("module.prop"), magiskDataDir);
+                    zipAddFile(os, p.resolve("remove"), magiskDataDir);
+                    zipAddFile(os, p.resolve("disable"), magiskDataDir);
+                    zipAddFile(os, p.resolve("update"), magiskDataDir);
+                    zipAddFile(os, p.resolve("sepolicy.rule"), magiskDataDir);
+                });
+            }
+            var proc = Paths.get("/proc");
+            for (var pid : new String[]{"self", String.valueOf(Binder.getCallingPid())}) {
+                var pidPath = proc.resolve(pid);
+                zipAddFile(os, pidPath.resolve("maps"), proc);
+                zipAddFile(os, pidPath.resolve("mountinfo"), proc);
+                zipAddFile(os, pidPath.resolve("status"), proc);
+            }
+            zipAddFile(os, dbPath.toPath(), configDirPath);
             ConfigManager.getInstance().exportScopes(os);
         } catch (Throwable e) {
             Log.w(TAG, "get log", e);
-            throw new RemoteException(Log.getStackTraceString(e));
+            throw new IllegalStateException(e);
         }
     }
 
@@ -295,6 +313,7 @@ public class ConfigFileManager {
     }
 
     private static void zipAddDir(ZipOutputStream os, Path path) throws IOException {
+        if (!Files.isDirectory(path)) return;
         Files.walkFileTree(path, new SimpleFileVisitor<>() {
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
                 if (Files.isRegularFile(file)) {
@@ -328,7 +347,8 @@ public class ConfigFileManager {
         return memory;
     }
 
-    private static void readDexes(ZipFile apkFile, List<SharedMemory> preLoadedDexes, boolean obfuscate) {
+    private static void readDexes(ZipFile apkFile, List<SharedMemory> preLoadedDexes,
+                                  boolean obfuscate) {
         int secondary = 2;
         for (var dexFile = apkFile.getEntry("classes.dex"); dexFile != null;
              dexFile = apkFile.getEntry("classes" + secondary + ".dex"), secondary++) {
@@ -351,7 +371,7 @@ public class ConfigFileManager {
                 if (name.isEmpty() || name.startsWith("#")) continue;
                 names.add(name);
             }
-        } catch (IOException e) {
+        } catch (IOException | OutOfMemoryError e) {
             Log.e(TAG, "Can not open " + initEntry, e);
         }
     }
@@ -365,14 +385,34 @@ public class ConfigFileManager {
         var moduleLibraryNames = new ArrayList<String>(1);
         try (var apkFile = new ZipFile(toGlobalNamespace(path))) {
             readDexes(apkFile, preLoadedDexes, obfuscate);
-            readName(apkFile, "assets/xposed_init", moduleClassNames);
-            readName(apkFile, "assets/native_init", moduleLibraryNames);
+            readName(apkFile, "META-INF/xposed/java_init.list", moduleClassNames);
+            if (moduleClassNames.isEmpty()) {
+                file.legacy = true;
+                readName(apkFile, "assets/xposed_init", moduleClassNames);
+                readName(apkFile, "assets/native_init", moduleLibraryNames);
+            } else {
+                file.legacy = false;
+                readName(apkFile, "META-INF/xposed/native_init.list", moduleLibraryNames);
+            }
         } catch (IOException e) {
             Log.e(TAG, "Can not open " + path, e);
             return null;
         }
         if (preLoadedDexes.isEmpty()) return null;
         if (moduleClassNames.isEmpty()) return null;
+
+        if (obfuscate) {
+            var signatures = ObfuscationManager.getSignatures();
+            for (int i = 0; i < moduleClassNames.size(); i++) {
+                var s = moduleClassNames.get(i);
+                for (var entry : signatures.entrySet()) {
+                    if (s.startsWith(entry.getKey())) {
+                        moduleClassNames.add(i, s.replace(entry.getKey(), entry.getValue()));
+                    }
+                }
+            }
+        }
+
         file.preLoadedDexes = preLoadedDexes;
         file.moduleClassNames = moduleClassNames;
         file.moduleLibraryNames = moduleLibraryNames;
@@ -404,6 +444,28 @@ public class ConfigFileManager {
             }
         }
         return preloadDex;
+    }
+
+    static void ensureModuleFilePath(String path) throws RemoteException {
+        if (path == null || path.indexOf(File.separatorChar) >= 0 || ".".equals(path) || "..".equals(path)) {
+            throw new RemoteException("Invalid path: " + path);
+        }
+    }
+
+    static Path resolveModuleDir(String packageName, String dir, int userId, int uid) throws IOException {
+        var path = modulePath.resolve(String.valueOf(userId)).resolve(packageName).resolve(dir).normalize();
+        if (uid != -1) {
+            if (path.toFile().mkdirs()) {
+                try {
+                    SELinux.setFileContext(path.toString(), "u:object_r:magisk_file:s0");
+                    Os.chown(path.toString(), uid, uid);
+                    Os.chmod(path.toString(), 0755);
+                } catch (ErrnoException e) {
+                    throw new IOException(e);
+                }
+            }
+        }
+        return path;
     }
 
     private static class FileLocker {

@@ -28,51 +28,59 @@ import android.content.res.CompatibilityInfo;
 import com.android.internal.os.ZygoteInit;
 
 import org.lsposed.lspd.deopt.PrebuiltMethodsDeopter;
+import org.lsposed.lspd.hooker.AttachHooker;
 import org.lsposed.lspd.hooker.CrashDumpHooker;
-import org.lsposed.lspd.hooker.HandleBindAppHooker;
 import org.lsposed.lspd.hooker.HandleSystemServerProcessHooker;
-import org.lsposed.lspd.hooker.LoadedApkCstrHooker;
+import org.lsposed.lspd.hooker.LoadedApkCtorHooker;
+import org.lsposed.lspd.hooker.LoadedApkCreateCLHooker;
+import org.lsposed.lspd.hooker.OpenDexFileHooker;
+import org.lsposed.lspd.impl.LSPosedContext;
+import org.lsposed.lspd.impl.LSPosedHelper;
 import org.lsposed.lspd.service.ILSPApplicationService;
 import org.lsposed.lspd.util.Utils;
 
+import java.util.List;
+
+import dalvik.system.DexFile;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.XposedInit;
 
 public class Startup {
     private static void startBootstrapHook(boolean isSystem) {
         Utils.logD("startBootstrapHook starts: isSystem = " + isSystem);
-        XposedHelpers.findAndHookMethod(Thread.class, "dispatchUncaughtException",
-                Throwable.class, new CrashDumpHooker());
+        LSPosedHelper.hookMethod(CrashDumpHooker.class, Thread.class, "dispatchUncaughtException", Throwable.class);
         if (isSystem) {
-            XposedBridge.hookAllMethods(ZygoteInit.class,
-                    "handleSystemServerProcess", new HandleSystemServerProcessHooker());
+            LSPosedHelper.hookAllMethods(HandleSystemServerProcessHooker.class, ZygoteInit.class, "handleSystemServerProcess");
+        } else {
+            LSPosedHelper.hookAllMethods(OpenDexFileHooker.class, DexFile.class, "openDexFile");
+            LSPosedHelper.hookAllMethods(OpenDexFileHooker.class, DexFile.class, "openInMemoryDexFile");
+            LSPosedHelper.hookAllMethods(OpenDexFileHooker.class, DexFile.class, "openInMemoryDexFiles");
         }
-        XposedHelpers.findAndHookMethod(ActivityThread.class,
-                "handleBindApplication",
-                "android.app.ActivityThread$AppBindData",
-                new HandleBindAppHooker());
-        XposedHelpers.findAndHookConstructor(LoadedApk.class,
+        LSPosedHelper.hookConstructor(LoadedApkCtorHooker.class, LoadedApk.class,
                 ActivityThread.class, ApplicationInfo.class, CompatibilityInfo.class,
-                ClassLoader.class, boolean.class, boolean.class, boolean.class,
-                new LoadedApkCstrHooker());
+                ClassLoader.class, boolean.class, boolean.class, boolean.class);
+        LSPosedHelper.hookMethod(LoadedApkCreateCLHooker.class, LoadedApk.class, "createOrUpdateClassLoaderLocked", List.class);
+        LSPosedHelper.hookAllMethods(AttachHooker.class, ActivityThread.class, "attach");
     }
 
     public static void bootstrapXposed() {
         // Initialize the Xposed framework
         try {
             startBootstrapHook(XposedInit.startsSystemServer);
-            XposedInit.loadModules();
+            XposedInit.loadLegacyModules();
         } catch (Throwable t) {
             Utils.logE("error during Xposed initialization", t);
         }
     }
 
-    public static void initXposed(boolean isSystem, String processName, ILSPApplicationService service) {
+    public static void initXposed(boolean isSystem, String processName, String appDir, ILSPApplicationService service) {
         // init logger
         ApplicationServiceClient.Init(service, processName);
         XposedBridge.initXResources();
         XposedInit.startsSystemServer = isSystem;
+        LSPosedContext.isSystemServer = isSystem;
+        LSPosedContext.appDir = appDir;
+        LSPosedContext.processName = processName;
         PrebuiltMethodsDeopter.deoptBootMethods(); // do it once for secondary zygote
     }
 }

@@ -1,14 +1,20 @@
 package org.lsposed.lspd;
 
-import io.github.xposed.xposedservice.utils.ParceledListSlice;
+import rikka.parcelablelist.ParcelableListSlice;
 import org.lsposed.lspd.models.UserInfo;
 import org.lsposed.lspd.models.Application;
 
 
 interface ILSPManagerService {
+    const int DEX2OAT_OK = 0;
+    const int DEX2OAT_CRASHED = 1;
+    const int DEX2OAT_MOUNT_FAILED = 2;
+    const int DEX2OAT_SELINUX_PERMISSIVE = 3;
+    const int DEX2OAT_SEPOLICY_INCORRECT = 4;
+
     String getApi() = 1;
 
-    ParceledListSlice<PackageInfo> getInstalledPackagesFromAllUsers(int flags, boolean filterNoProcess) = 2;
+    ParcelableListSlice<PackageInfo> getInstalledPackagesFromAllUsers(int flags, boolean filterNoProcess) = 2;
 
     String[] enabledModules() = 3;
 
@@ -16,9 +22,9 @@ interface ILSPManagerService {
 
     boolean disableModule(String packageName) = 5;
 
-    boolean setModuleScope(String packageName, in ParceledListSlice<Application> scope) = 6;
+    boolean setModuleScope(String packageName, in List<Application> scope) = 6;
 
-    ParceledListSlice<Application> getModuleScope(String packageName) = 7;
+    List<Application> getModuleScope(String packageName) = 7;
 
     boolean isVerboseLog() = 11;
 
@@ -40,7 +46,7 @@ interface ILSPManagerService {
 
     void forceStopPackage(String packageName, int userId) = 23;
 
-    void reboot(boolean shutdown) = 24;
+    void reboot() = 24;
 
     boolean uninstallPackage(String packageName, int userId) = 25;
 
@@ -54,7 +60,7 @@ interface ILSPManagerService {
 
     int startActivityAsUserWithFeature(in Intent intent,  int userId) = 30;
 
-    ParceledListSlice<ResolveInfo> queryIntentActivitiesAsUser(in Intent intent, int flags, int userId) = 31;
+    ParcelableListSlice<ResolveInfo> queryIntentActivitiesAsUser(in Intent intent, int flags, int userId) = 31;
 
     boolean dex2oatFlagsLoaded() = 32;
 
@@ -63,12 +69,6 @@ interface ILSPManagerService {
     void getLogs(in ParcelFileDescriptor zipFd) = 34;
 
     void restartFor(in Intent intent) = 35;
-
-    void createShortcut() = 36;
-
-    boolean isAddShortcut() = 37;
-
-    void setAddShortcut(boolean enabled) = 38;
 
     oneway void flashZip(String zipPath, in ParcelFileDescriptor outputStream) = 39;
 
@@ -79,4 +79,12 @@ interface ILSPManagerService {
     boolean getDexObfuscate() = 42;
 
     void setDexObfuscate(boolean enable) = 43;
+
+    int getDex2OatWrapperCompatibility() = 44;
+
+    void clearApplicationProfileData(in String packageName) = 45;
+
+    boolean enableStatusNotification() = 47;
+
+    void setEnableStatusNotification(boolean enable) = 48;
 }

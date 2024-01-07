@@ -18,10 +18,14 @@
  */
 
 plugins {
-    id("com.android.library")
+    alias(libs.plugins.agp.lib)
 }
 
 android {
+    buildFeatures {
+        aidl = true
+    }
+
     defaultConfig {
         consumerProguardFiles("proguard-rules.pro")
     }
@@ -34,6 +38,7 @@ android {
 
     aidlPackagedList += "org/lsposed/lspd/models/Module.aidl"
     aidlPackagedList += "org/lsposed/lspd/models/PreloadedApk.aidl"
+    namespace = "org.lsposed.lspd.daemonservice"
 }
 
 dependencies {
